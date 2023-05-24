@@ -76,7 +76,7 @@ class MultitaskMultivariateNormalMask(MultitaskMultivariateNormal):
         elif mean.shape[-2] < mask.shape[-2]:
             raise RuntimeError("The value of mask.shape[0] should not exceed the number of training samples")
 
-        
+        self.mask = mask
         self._output_shape = mean.shape
         # TODO: Instead of transpose / view operations, use a PermutationLinearOperator (see #539)
         # to handle interleaving
@@ -89,14 +89,31 @@ class MultitaskMultivariateNormalMask(MultitaskMultivariateNormal):
             mask_mvn = mask.transpose(0, 1).flatten()
 
         ntrain = len(mask_mvn)
-        idx = torch.arange(ntrain, dtype=torch.long)[mask_mvn]
+        self.idx = torch.arange(ntrain, dtype=torch.long)[mask_mvn]
         if mean.shape[-2] > ntrain:
             idx2 = torch.arange(ntrain, mean.shape[-1], dtype=torch.long)
-            idx = torch.cat(idx, idx2)
-        cols = torch.stack([idx] * len(idx), dim=0)
+            self.idx = torch.cat(self.idx, idx2)
+        cols = torch.stack([self.idx] * len(self.idx), dim=0)
         rows = cols.transpose(0,1)
 
-        mean_mvn = mean_mvn[...,idx]
+        mean_mvn = mean_mvn[...,self.idx]
+        self.covar_orig = covariance_matrix
         covariance_matrix = covariance_matrix[..., rows, cols]
 
         super(MultitaskMultivariateNormal, self).__init__(mean=mean_mvn, covariance_matrix=covariance_matrix, validate_args=validate_args)
+
+#################
+    def expand(self, batch_size):
+        new_mean = self.mean.expand(torch.Size(batch_size) + self.mean.shape[-2:])
+        new_covar = self._covar.expand(torch.Size(batch_size) + self._covar.shape[-2:])
+        res = self.__class__(self.mask, new_mean, new_covar, interleaved=self._interleaved)
+        return res
+
+#################
+    def log_prob(self, value):
+        if not self._interleaved:
+            # flip shape of last two dimensions
+            new_shape = value.shape[:-2] + value.shape[:-3:-1]
+            value = value.view(new_shape).transpose(-1, -2).contiguous()
+            value = value.reshape(*value.shape[:-2], -1)[self.idx]
+        return super(MultitaskMultivariateNormal, self).log_prob(value)
