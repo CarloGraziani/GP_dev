@@ -1,4 +1,4 @@
-from typing import Optional, Callable
+from typing import Callable
 
 from torch import Tensor
 from gpytorch.kernels import IndexKernel

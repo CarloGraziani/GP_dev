@@ -1,7 +1,6 @@
 from typing import Callable
 from constrained_index_kernel import ConstrainedIndexKernel
 from gpytorch.kernels import MultitaskKernel, Kernel
-import torch
 from torch import Tensor
 
 ######################################################################

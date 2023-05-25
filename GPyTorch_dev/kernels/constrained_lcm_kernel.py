@@ -1,8 +1,6 @@
 from typing import List
 from constrained_multitask_kernel import ConstrainedMultitaskKernel
-from gpytorch.kernels import LCMKernel, Kernel
-import torch
-from torch import Tensor
+from gpytorch.kernels import LCMKernel
 from torch.nn import ModuleList
 
 ######################################################################

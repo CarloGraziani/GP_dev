@@ -1,5 +1,5 @@
 from gpytorch.likelihoods import MultitaskGaussianLikelihood
-from multitask_multivariate_normal_mask import MultitaskMultivariateNormalMask
+from distributions.multitask_multivariate_normal_mask import MultitaskMultivariateNormalMask
 from gpytorch.lazy import LazyEvaluatedKernelTensor
 from typing import Any 
 
