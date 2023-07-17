@@ -43,3 +43,9 @@ class ConstrainedMultitaskKernel(MultitaskKernel):
         self.task_covar_module = ConstrainedIndexKernel(B_fn, v_fn, **kwargs)
         self.data_covar_module = data_covar_module
         self.num_tasks = num_tasks
+
+#################
+    def forward(self, x1, x2, diag=False, last_dim_is_batch=False, **params):
+        self.task_covar_module.input = (x1, x2)
+        res = super().forward(x1, x2, diag, last_dim_is_batch, **params)
+        return res

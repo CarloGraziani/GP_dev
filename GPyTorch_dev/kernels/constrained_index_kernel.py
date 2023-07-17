@@ -11,9 +11,11 @@ class ConstrainedIndexKernel(IndexKernel):
 
     Args:
         B_fn (callable):
-            Function to be called returning the B matrix.
+            Function to be called returning the B matrix. Accepts an optional argument input, a
+            tuple of 2 tensors representing the two base-space inputs to the covariance
         v_fn (callable):
-            Function to be called returning the v vector.
+            Function to be called returning the v vector. Accepts an optional argument input, a
+            tuple of 2 tensors representing the two base-space inputs to the covariance
         batch_shape (torch.Size, optional):
             Set if the MultitaskKernel is operating on batches of data (and you want different
             parameters for each batch)
@@ -33,13 +35,14 @@ class ConstrainedIndexKernel(IndexKernel):
         super(IndexKernel, self).__init__(**kwargs) # This should call Kernel's init
         self.B_fn = B_fn
         self.v_fn = v_fn
+        self.input = None
 
 #################
     @property
     def var(self):
-        return self.v_fn()
+        return self.v_fn(input=self.input)
     
     @property
     def covar_factor(self):
-        return self.B_fn()
+        return self.B_fn(input=self.input)
 

@@ -2,6 +2,21 @@ import torch
 from torch import Tensor, BoolTensor
 from gpytorch.distributions import MultitaskMultivariateNormal
 from linear_operator import LinearOperator
+import functools
+
+def swap_cov(func):
+    """Temporarily swap the original covariance in so a function sees that instead of the masked covariance"""
+
+    @functools.wraps(func)    
+    def wrapper(*args, **kwargs):
+        self = func.__self__
+        covar_save = self._covar
+        self._covar = self.covar_orig
+        res = func(*args, **kwargs)
+        self._covar = covar_save
+        return res
+    return wrapper
+
 
 ######################################################################
 class MultitaskMultivariateNormalMask(MultitaskMultivariateNormal):
@@ -89,18 +104,19 @@ class MultitaskMultivariateNormalMask(MultitaskMultivariateNormal):
             mask_mvn = mask.transpose(0, 1).flatten()
 
         ntrain = len(mask_mvn)
+        ntot = len(mean_mvn)
         self.idx = torch.arange(ntrain, dtype=torch.long)[mask_mvn]
-        if mean.shape[-2] > ntrain:
-            idx2 = torch.arange(ntrain, mean.shape[-1], dtype=torch.long)
+        if ntot > ntrain:
+            idx2 = torch.arange(ntrain, ntot, dtype=torch.long)
             self.idx = torch.cat(self.idx, idx2)
         cols = torch.stack([self.idx] * len(self.idx), dim=0)
         rows = cols.transpose(0,1)
 
         mean_mvn = mean_mvn[...,self.idx]
         self.covar_orig = covariance_matrix
-        covariance_matrix = covariance_matrix[..., rows, cols]
+        covariance_mvn = covariance_matrix[..., rows, cols]
 
-        super(MultitaskMultivariateNormal, self).__init__(mean=mean_mvn, covariance_matrix=covariance_matrix, validate_args=validate_args)
+        super(MultitaskMultivariateNormal, self).__init__(mean=mean_mvn, covariance_matrix=covariance_mvn, validate_args=validate_args)
 
 #################
     def expand(self, batch_size):
@@ -115,5 +131,22 @@ class MultitaskMultivariateNormalMask(MultitaskMultivariateNormal):
             # flip shape of last two dimensions
             new_shape = value.shape[:-2] + value.shape[:-3:-1]
             value = value.view(new_shape).transpose(-1, -2).contiguous()
-            value = value.reshape(*value.shape[:-2], -1)[self.idx]
+            value = value.reshape(*value.shape[:-2], -1)[..., self.idx]
         return super(MultitaskMultivariateNormal, self).log_prob(value)
+
+#################
+    @swap_cov
+    def rsample(self, sample_shape=torch.Size(), base_samples=None):
+        return super().rsample(sample_shape, base_samples)
+
+#################
+    @swap_cov
+    def to_data_independent_dist(self, jitter_val=1e-4):
+        return super().to_data_independent_dist(jitter_val)
+
+
+#################
+    @swap_cov
+    @property
+    def variance(self):
+        return super().variance
