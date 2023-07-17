@@ -20,13 +20,27 @@ SKernel = fix_lengthscale(Kernel)
 
 class ExperimentalUncertaintyKernel(SKernel):
     """
+    Kernel for characterizing uncertainty due to experiment-to-experiment irreproducibility.
+
+    Args:
+        base_kernel (Kernel):
+            kernel that will furnish the within-experiment model
+        data_size (int):
+            size of data from a single experiment (number of samples). This must be the same for all experiments.
+        exp_par_shape (tuple[int]):
+            The indices of the input vector that correspond to controlled experimental input parameters. The input data dimensionality must be exp_par_shape+1, which is to say that each experiment produces 1-dimensional data.
+        outputscale_fn (bool, Optional, default=False):
+            Whether the log output scale should be a linear function of the controlled experimental parameters.
+        lengthscale_fn  (bool, Optional, default=False):
+            Whether the log lengthscale  should be a linear function of the controlled experimental parameters.
+
     """
 
 #################
     def __init__(self,
                  base_kernel: Kernel,
                  data_size: int,
-                 exp_par_size: tuple[int],
+                 exp_par_shape: tuple[int],
                  outputscale_fn: bool = False,
                  lengthscale_fn: bool = False,
                  **kwargs) -> None:
@@ -36,8 +50,8 @@ class ExperimentalUncertaintyKernel(SKernel):
         self.is_stationary = base_kernel.is_stationary
         self.base_kernel = base_kernel
         self.data_size = data_size
-        self.exp_par_size = exp_par_size
-        epl = len(exp_par_size)
+        self.exp_par_shape = exp_par_shape
+        epl = len(exp_par_shape)
 
         self.register_parameter("os_0", 
                                 parameter=torch.nn.Parameter(torch.zeros(*self.batch_shape,1)))
@@ -74,7 +88,7 @@ class ExperimentalUncertaintyKernel(SKernel):
         if x1_.shape[-2] % self.data_size != 0 or x2_.shape[-2] % self.data_size != 0:
             raise ValueError("Input data size not a multiple of %d" % (self.data_size))
         
-        if not x1_.shape[-1] == len(self.exp_par_size) + 1:
+        if not x1_.shape[-1] == len(self.exp_par_shape) + 1:
             raise ValueError("Only 1-D within-experiment data supported") # this may change someday
         
         if not torch.equal(x1_, x2_):
@@ -84,14 +98,14 @@ class ExperimentalUncertaintyKernel(SKernel):
         x1_ = x1_.reshape(ns)
         x2_ = x2_.reshape(ns)
 
-        ls_exp = self.ls_0 + x1_[..., 0,self.exp_par_size].matmul(self.ls_v)
+        ls_exp = self.ls_0 + x1_[..., 0,self.exp_par_shape].matmul(self.ls_v)
         ls = torch.exp(ls_exp)
         ls = ls[:,None,None]
-        os_exp = self.os_0 + x1_[..., 0,self.exp_par_size].matmul(self.os_v)
+        os_exp = self.os_0 + x1_[..., 0,self.exp_par_shape].matmul(self.os_v)
         os = torch.exp(os_exp)
         os = os[:,None,None]
 
-        active_dim = [i for i in range(x1_.shape[-1]) if not i in self.exp_par_size]
+        active_dim = [i for i in range(x1_.shape[-1]) if not i in self.exp_par_shape]
         x1_ = x1_[...,active_dim] / ls
         x2_ = x2_[...,active_dim] / ls
 
