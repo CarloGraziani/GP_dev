@@ -5,15 +5,19 @@ from linear_operator.operators.block_diag_linear_operator import BlockDiagLinear
 from linear_operator.operators.zero_linear_operator import ZeroLinearOperator
 from copy import deepcopy
 
-def fix_lengthscale(kernel_cls):
+def fix_lengthscale(parent_cls):
     """
     Ensure that a stationary kernel may be defined without it acquiring an adjustable lengthscale.
     """
-    newcls = deepcopy(kernel_cls)
-    newcls.is_stationary = True
-    newcls.has_lengthscale = False
-    newcls.lengthscale = 1.0
-    return newcls
+    class kernel_cls(parent_cls):
+        def __init__(self, *arg, **kwargs):
+            super().__init__(*arg, **kwargs)
+
+    kernel_cls.is_stationary = True
+    kernel_cls.has_lengthscale = False
+    kernel_cls.lengthscale = Tensor([1.0])
+                                    
+    return kernel_cls
 
 SKernel = fix_lengthscale(Kernel)
 #SKernel.is_stationary = True
@@ -92,7 +96,7 @@ class ExperimentalUncertaintyKernel(SKernel):
             raise ValueError("Only 1-D within-experiment data supported") # this may change someday
         
         if not torch.equal(x1_, x2_):
-            return ZeroLinearOperator(tuple(*bs, x1_.shape[-2], x2_.shape[-2]))
+            return ZeroLinearOperator(tuple([*bs, x1_.shape[-2], x2_.shape[-2]]))
         
         ns = [*x1_.shape[:-2], x1_.shape[-2] // self.data_size, self.data_size, x1_.shape[-1]]
         x1_ = x1_.reshape(ns)
