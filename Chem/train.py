@@ -28,6 +28,7 @@ octl = None
 mask=None
 zscore_input = False
 zscore_output = False
+report_full_validation = False
 
 # jobctl is a dict containing control parameters and the GPyTorch model class EPUModel 
 from train_in import jobctl, EPUModel
@@ -82,14 +83,15 @@ noise = noise_roi[:, train_ind]
 noise = noise.flatten()
 
 dof = len(train_y)
+c2 = chi2(dof)
 
 # Test and validation data
-test_x = expts_roi[:,test_ind,:]
-test_y = spec_roi[:,test_ind]
-t_noise = noise_roi[:, test_ind]
+val_x = expts_roi[:,test_ind,:]
+val_y = spec_roi[:,test_ind]
+val_noise = noise_roi[:, test_ind]
 
-val_x = test_x[0] ; val_y = test_y[0] ; val_noise = t_noise[0]
-test_x = test_x[1:] ; test_y = test_y[1:] ; test_noise = t_noise[1:]
+# val_x = test_x[0] ; val_y = test_y[0] ; val_noise = t_noise[0]
+# test_x = test_x[1:] ; test_y = test_y[1:] ; test_noise = t_noise[1:]
 
 # Put everything on GPU
 train_x = train_x.cuda()
@@ -98,7 +100,8 @@ noise = noise.cuda()
 val_x = val_x.cuda()
 val_y = val_y.cuda()
 val_noise = val_noise.cuda()
-dof_val = len(val_y)
+dof_val = val_y.shape[-1]
+c2_val = chi2(dof_val)
 
 ## Set up the model    
 likelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(noise=noise)
@@ -175,17 +178,31 @@ with open("model_output.txt", "a") as ofd:
                 diff = (train_y - mean).unsqueeze(-1)
                 covar = covar.evaluate_kernel()
                 inv_quad_t, logdet_t = covar.inv_quad_logdet(inv_quad_rhs=diff, logdet=True)
+                inv_quad_t = inv_quad_t.cpu().detach()
+                pvalue = c2.cdf(inv_quad_t)
+                qvalue = c2.sf(inv_quad_t)
                 loss2 = 0.5 * ( (inv_quad_t + logdet_t)/train_y.shape[-1] + log(2*pi) )
 
                 model.eval() ; likelihood.eval()
 
+                chi2_val = [] ; logpval_val = [] ; logsfval_val = []
                 with gpytorch.settings.fast_pred_var():
-                    mvn = model(val_x)
-                    lik = likelihood(mvn, noise=val_noise)
-                    mean, covar = lik.loc, lik.lazy_covariance_matrix
-                    diff = (val_y - mean).unsqueeze(-1)
-                    covar = covar.evaluate_kernel()
-                    inv_quad_vf = covar.inv_quad(inv_quad_rhs=diff)
+                    for l in range(nspec):
+                        mvn = model(val_x[l,...])
+                        lik = likelihood(mvn, noise=val_noise[l,:])
+                        mean, covar = lik.loc, lik.lazy_covariance_matrix
+                        diff = (val_y[l,:] - mean).unsqueeze(-1)
+                        covar = covar.evaluate_kernel()
+                        inv_quad_vf = covar.inv_quad(inv_quad_rhs=diff).cpu().detach()
+                        pvalue_val = c2_val.logcdf(inv_quad_vf)
+                        qvalue_val = c2_val.logsf(inv_quad_vf)
+                        chi2_val.append(inv_quad_vf)
+                        logpval_val.append(pvalue_val)
+                        logsfval_val.append(qvalue_val)
+
+                chi2_val_mn = Tensor(chi2_val).mean()
+                logpval_val_mn = Tensor(logpval_val).mean()
+                logsfval_val_mn = Tensor(logsfval_val).mean()
 
                 model.train() ; likelihood.train()
 
@@ -202,9 +219,18 @@ with open("model_output.txt", "a") as ofd:
                 fstr += "\n  {1} = {{{0}:{2}}}".format(i, names[i], fmts[i])
             outstr += fstr.format(*vals)
             outstr += \
-                f"\n  Training Chi-squared = {inv_quad_t:16.9E}, DOF = {dof:d}"+\
+                f"\n  Training Chi-squared = {inv_quad_t:16.9E}, DOF = {dof:d},"+\
+                f"\n                     P = {pvalue:10.3E}, 1-P = {qvalue:10.3E}"+\
                 f"\n  Training Log Det = {logdet_t:16.9E}"+\
-                f"\n  Fast Validation Chi-squared = {inv_quad_vf:16.9E}, DOF = {dof_val:d}"+\
+                f"\n  Mean Val. Chi-squared = {chi2_val_mn:16.9E}, DOF = {dof_val:d},"+\
+                f"\n            Mean log(P) = {logpval_val_mn:10.3E}, Mean log(1-P) = {logsfval_val_mn:10.3E}"
+            if report_full_validation:
+                outstr += \
+                "\n Val Chi_Squared: [" + ("{:16.9E} ," * (nspec-1)).format(*chi2_val[:-1]) + "{:16.9E}]".format(chi2_val[-1]) +\
+                "\n Val Log P: [" + ("{:16.9E} ," * (nspec-1)).format(*logpval_val[:-1]) + "{:16.9E}]".format(logpval_val[-1]) +\
+                "\n Val Log(1-P): [" + ("{:16.9E} ," * (nspec-1)).format(*logsfval_val[:-1]) + "{:16.9E}]".format(logsfval_val[-1])
+
+            outstr += \
                 f"\n  Elapsed Time in This Iteration = {dt:.2f}"+\
                 "\n"
             ofd.write(outstr)
