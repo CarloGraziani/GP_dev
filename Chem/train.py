@@ -2,28 +2,32 @@ import torch
 from torch import Tensor
 import gpytorch
 import linear_operator
-from experimental_uncertainty_kernel import ExperimentalUncertaintyKernel, fix_lengthscale
 from scipy.stats import chi2
+from math import log, pi
 import sys
 import time
 
-torch.set_default_dtype(torch.float64)
 sys.path.insert(0,"..")
 sys.path.insert(0,".")
+from experimental_uncertainty_kernel import ExperimentalUncertaintyKernel, fix_lengthscale
+
+torch.set_default_dtype(torch.float64)
 
 # Define parameters to be initialized by jobctl
-
-test_samp = False
-init_params = False
-training_iterations = False
-save_state_cadence = False
-time_limit = False
-max_cg = False
-lr = False
-max_prec_size = False
-prec_tolerance = False
-octl = False
-
+thin_data = None
+test_samp = None
+init_params = None
+training_iterations = None
+save_state_cadence = None
+time_limit = None
+max_cg = None
+lr = None
+max_prec_size = None
+prec_tolerance = None
+octl = None
+mask=None
+zscore_input = False
+zscore_output = False
 
 # jobctl is a dict containing control parameters and the GPyTorch model class EPUModel 
 from train_in import jobctl, EPUModel
@@ -34,6 +38,32 @@ globals().update(jobctl)
 data_dir = "../../Data/"
 dt = torch.load(data_dir+"roi_all_comps.pt")
 expts_roi = dt["expts_roi"] ; spec_roi = dt["spec_roi"]
+
+if mask is not None:
+    nexp = spec_roi.shape[0]
+    ind = [i for i in range(nexp) if not i in mask]
+    expts_roi = expts_roi[ind, :, :]
+    spec_roi = spec_roi[ind, :]
+
+
+if thin_data is not None:
+    ind = torch.arange(spec_roi.shape[1])
+    ind =ind[(ind % thin_data).to(int) == 0]
+    expts_roi = expts_roi[:, ind, :]
+    spec_roi = spec_roi[:, ind]
+
+in_mean = 0.0 ; in_std = 1.0
+if zscore_input:
+    in_mean = expts_roi.mean(dim=(0,1))
+    in_std = expts_roi.std(dim=(0,1))
+    expts_roi = (expts_roi - in_mean) / in_std
+
+out_mean = 0.0 ; out_std = 1.0
+if zscore_output:
+    out_mean = spec_roi.mean()
+    out_std = spec_roi.std()
+    noise_roi = spec_roi / out_std**2 
+    spec_roi = (spec_roi - out_mean) / out_std
 
 block_shape = spec_roi.shape ; dim = expts_roi.shape[-1]
 nspecbin = block_shape[1] ; nspec = block_shape[0]
@@ -48,21 +78,23 @@ tx = expts_roi[:,train_ind,:]
 train_x = tx.reshape((-1, dim))
 ty = spec_roi[:,train_ind]
 train_y = ty.flatten()
-
-noise = train_y
+noise = noise_roi[:, train_ind]
+noise = noise.flatten()
 
 dof = len(train_y)
 
 # Test and validation data
 test_x = expts_roi[:,test_ind,:]
 test_y = spec_roi[:,test_ind]
+t_noise = noise_roi[:, test_ind]
 
-val_x = test_x[0] ; val_y = test_y[0] ; val_noise = val_y
-test_x = test_x[1:] ; test_y = test_y[1:] ; test_noise = test_y
+val_x = test_x[0] ; val_y = test_y[0] ; val_noise = t_noise[0]
+test_x = test_x[1:] ; test_y = test_y[1:] ; test_noise = t_noise[1:]
 
 # Put everything on GPU
 train_x = train_x.cuda()
 train_y = train_y.cuda()
+noise = noise.cuda()
 val_x = val_x.cuda()
 val_y = val_y.cuda()
 val_noise = val_noise.cuda()
@@ -82,8 +114,9 @@ likelihood = likelihood.cuda()
 # sys.exit()
 
 # Initialization of parameters
-mn_init = train_y.mean()
-init_params["mean_module.constant"]=mn_init
+if hasattr(model.mean_module, "constant") and not init_params.get("mean_module.constant"):
+    mn_init = train_y.mean()
+    init_params["mean_module.constant"]=mn_init
 model.initialize(**init_params)
 
 
@@ -98,7 +131,8 @@ if len(sys.argv) > 1:
         model.load_state_dict(state_dict)
         curr_iter = int(sys.argv[1][16:21]) + 1
     except FileNotFoundError:
-        pass
+        print(f"File {sys.argv[1]} not found!")
+        raise
 
 
 model.train()
@@ -124,7 +158,7 @@ with open("model_output.txt", "a") as ofd:
             loss = -mll(output, train_y)
             loss.backward()
             optimizer.step()
-            mn = model.mean_module.constant.item()
+            # mn = model.mean_module.constant.item()
 
             vals = [] ; fmts = [] ; names = []
             val=0
@@ -141,7 +175,7 @@ with open("model_output.txt", "a") as ofd:
                 diff = (train_y - mean).unsqueeze(-1)
                 covar = covar.evaluate_kernel()
                 inv_quad_t, logdet_t = covar.inv_quad_logdet(inv_quad_rhs=diff, logdet=True)
-                loss2 = inv_quad_t + logdet_t
+                loss2 = 0.5 * ( (inv_quad_t + logdet_t)/train_y.shape[-1] + log(2*pi) )
 
                 model.eval() ; likelihood.eval()
 
@@ -161,7 +195,7 @@ with open("model_output.txt", "a") as ofd:
             tick = tock
 
             outstr = f"{iter}: Loss = {loss.item():10.3E};"+ \
-                     f"\n  Mean = {mn:16.9E};"
+                     f"\n  Evaluated loss = {loss2:10.3E};"
 
             fstr = ""
             for i in range(len(names)):
