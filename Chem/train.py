@@ -28,6 +28,7 @@ octl = None
 mask=None
 zscore_input = False
 zscore_output = False
+zscore_per_expt = False
 report_full_validation = False
 
 # jobctl is a dict containing control parameters and the GPyTorch model class EPUModel 
@@ -55,14 +56,24 @@ if thin_data is not None:
 
 in_mean = 0.0 ; in_std = 1.0
 if zscore_input:
-    in_mean = expts_roi.mean(dim=(0,1))
-    in_std = expts_roi.std(dim=(0,1))
-    expts_roi = (expts_roi - in_mean) / in_std
+    if zscore_per_expt:
+        # Use wavenumber range of 1st experiment to zscore the wavenumbers only
+        in_mean = expts_roi[0, :, 0].mean()
+        in_std = expts_roi[0, :, 0].std()
+        expts_roi[:,:,0] = (expts_roi[:,:,0] - in_mean) / in_std
+    else:
+        in_mean = expts_roi.mean(dim=(0,1))
+        in_std = expts_roi.std(dim=(0,1))
+        expts_roi = (expts_roi - in_mean) / in_std
 
 out_mean = 0.0 ; out_std = 1.0
 if zscore_output:
-    out_mean = spec_roi.mean()
-    out_std = spec_roi.std()
+    if zscore_per_expt:
+        out_mean = spec_roi.mean(dim=-1, keepdims=True)
+        out_std = spec_roi.std(dim=-1, keepdims=True)
+    else:
+        out_mean = spec_roi.mean()
+        out_std = spec_roi.std()
     noise_roi = spec_roi / out_std**2 
     spec_roi = (spec_roi - out_mean) / out_std
 
@@ -201,8 +212,11 @@ with open("model_output.txt", "a") as ofd:
                         logsfval_val.append(qvalue_val)
 
                 chi2_val_mn = Tensor(chi2_val).mean()
+                chi2_val_md = Tensor(chi2_val).quantile(q=0.5)
                 logpval_val_mn = Tensor(logpval_val).mean()
+                logpval_val_md = Tensor(logpval_val).quantile(q=0.5)
                 logsfval_val_mn = Tensor(logsfval_val).mean()
+                logsfval_val_md = Tensor(logsfval_val).quantile(q=0.5)
 
                 model.train() ; likelihood.train()
 
@@ -223,7 +237,9 @@ with open("model_output.txt", "a") as ofd:
                 f"\n                     P = {pvalue:10.3E}, 1-P = {qvalue:10.3E}"+\
                 f"\n  Training Log Det = {logdet_t:16.9E}"+\
                 f"\n  Mean Val. Chi-squared = {chi2_val_mn:16.9E}, DOF = {dof_val:d},"+\
-                f"\n            Mean log(P) = {logpval_val_mn:10.3E}, Mean log(1-P) = {logsfval_val_mn:10.3E}"
+                f"\n            Mean log(P) = {logpval_val_mn:10.3E}, Mean log(1-P) = {logsfval_val_mn:10.3E}"+\
+                f"\n  Median Val. Chi-squared = {chi2_val_md:16.9E}, DOF = {dof_val:d},"+\
+                f"\n            Median log(P) = {logpval_val_mn:10.3E}, Median log(1-P) = {logsfval_val_mn:10.3E}"
             if report_full_validation:
                 outstr += \
                 "\n Val Chi_Squared: [" + ("{:16.9E} ," * (nspec-1)).format(*chi2_val[:-1]) + "{:16.9E}]".format(chi2_val[-1]) +\
