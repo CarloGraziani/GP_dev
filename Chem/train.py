@@ -26,9 +26,12 @@ max_prec_size = None
 prec_tolerance = None
 octl = None
 mask=None
+roi_selection = None
 zscore_input = False
 zscore_output = False
 zscore_per_expt = False
+scale_wns = None
+scale_out = None
 report_full_validation = False
 
 # jobctl is a dict containing control parameters and the GPyTorch model class EPUModel 
@@ -40,6 +43,7 @@ globals().update(jobctl)
 data_dir = "../../Data/"
 dt = torch.load(data_dir+"roi_all_comps.pt")
 expts_roi = dt["expts_roi"] ; spec_roi = dt["spec_roi"]
+roi_bds = Tensor([[889.89, 1090.0], [1270.0, 1360.0], [1379.99, 1560.0], [1589.95, 1770.0]])
 
 if mask is not None:
     nexp = spec_roi.shape[0]
@@ -47,6 +51,14 @@ if mask is not None:
     expts_roi = expts_roi[ind, :, :]
     spec_roi = spec_roi[ind, :]
 
+if roi_selection is not None:
+    mask = torch.zeros_like(spec_roi[0,:]).to(bool)
+    for roi in roi_selection:
+        m = torch.logical_and(expts_roi[0,:,0] > roi_bds[roi, 0], 
+                              expts_roi[0,:,0] < roi_bds[roi, 1])
+        mask = torch.logical_or(mask, m)
+    spec_roi = spec_roi[:, mask]
+    expts_roi = expts_roi[:, mask, :]
 
 if thin_data is not None:
     ind = torch.arange(spec_roi.shape[1])
@@ -77,8 +89,19 @@ if zscore_output:
     noise_roi = spec_roi / out_std**2 
     spec_roi = (spec_roi - out_mean) / out_std
 
+if scale_wns is not None:
+    lengths = torch.exp( scale_wns[0] + expts_roi[:,:,1:].matmul(scale_wns[1:]) )
+    lengths = lengths / lengths[0,0]
+    expts_roi[...,0] = expts_roi[...,0] * lengths
+
+if scale_out is not None:
+    oscls = torch.exp( scale_out[0] + expts_roi[:,:,1:].matmul(scale_out[1:]) )
+    oscls = oscls / oscls[0,0]
+    spec_roi = spec_roi / oscls
+
 block_shape = spec_roi.shape ; dim = expts_roi.shape[-1]
 nspecbin = block_shape[1] ; nspec = block_shape[0]
+
 
 # a test sample every test_samp bins
 ind = torch.arange(nspecbin)
