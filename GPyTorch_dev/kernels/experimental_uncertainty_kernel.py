@@ -102,6 +102,8 @@ class ExperimentalUncertaintyKernel(SKernel):
         self.train_x = train_x
         self.exp_par_ind = exp_par_ind
         epl = len(exp_par_ind)
+        self.outputscale_fn = outputscale_fn
+        self.lengthscale_fn = lengthscale_fn
 
         n_training_samples = train_x.shape[-2]
         if isinstance(data_size, int):
@@ -128,13 +130,15 @@ class ExperimentalUncertaintyKernel(SKernel):
             self.register_parameter("os_v", 
                                 parameter=torch.nn.Parameter(torch.zeros(*self.batch_shape, epl)))
         else:
-            self.os_v = torch.zeros(*self.batch_shape, epl)
+            self.register_buffer("os_v", 
+                                tensor=torch.nn.Parameter(torch.zeros(*self.batch_shape, epl)))
 
         if lengthscale_fn:
             self.register_parameter("ls_v", 
                                 parameter=torch.nn.Parameter(torch.zeros(*self.batch_shape, epl)))
         else:
-            self.ls_v = torch.zeros(*self.batch_shape, epl)
+            self.register_buffer("ls_v", 
+                                tensor=torch.nn.Parameter(torch.zeros(*self.batch_shape, epl)))
 
 #################
     def forward(self, x1: Tensor, x2: Tensor, last_dim_is_batch: bool = False, 
@@ -161,6 +165,7 @@ class ExperimentalUncertaintyKernel(SKernel):
         ls_exp = self.ls_0 + x1_[..., self.exp_par_ind].matmul(self.ls_v)
         ls = torch.exp(ls_exp)
         ls = ls[:,None]
+
         os_exp = self.os_0 + x1_[..., self.exp_par_ind].matmul(self.os_v)
         os = torch.exp(os_exp)
 
