@@ -13,6 +13,8 @@ sys.path.insert(0,".")
 
 # Define parameters to be initialized by jobctl
 
+data_dir = "../../Data/"
+data_file = "roi_all_comps.pt"
 test_samp = False
 init_params = False
 training_iterations = False
@@ -31,11 +33,11 @@ globals().update(jobctl)
 
 
 #### Load and prep the data
-data_dir = "../../Data/"
-dt = torch.load(data_dir+"roi_all_comps.pt")
-expts_roi = dt["expts_roi"] ; spec_roi = dt["spec_roi"]
+dt = torch.load(data_dir+data_file)
+k = list(dt.keys)
+expts= dt[k[0]] ; spec = dt[k[1]]
 
-block_shape = spec_roi.shape ; dim = expts_roi.shape[-1]
+block_shape = spec.shape ; dim = expts.shape[-1]
 nspecbin = block_shape[1] ; nspec = block_shape[0]
 
 # a test sample every test_samp bins
@@ -44,9 +46,9 @@ train_ind = ind[(ind % test_samp).to(int) != 0]
 test_ind = ind[(ind % test_samp).to(int) == 0]
 
 # Training data
-tx = expts_roi[:,train_ind,:]
+tx = expts[:,train_ind,:]
 train_x = tx.reshape((-1, dim))
-ty = spec_roi[:,train_ind]
+ty = spec[:,train_ind]
 train_y = ty.flatten()
 
 noise = train_y
@@ -54,8 +56,8 @@ noise = train_y
 dof = len(train_y)
 
 # Test and validation data
-test_x = expts_roi[:,test_ind,:]
-test_y = spec_roi[:,test_ind]
+test_x = expts[:,test_ind,:]
+test_y = spec[:,test_ind]
 
 val_x = test_x[0] ; val_y = test_y[0] ; val_noise = val_y
 test_x = test_x[1:] ; test_y = test_y[1:] ; test_noise = test_y
