@@ -2,30 +2,40 @@ import torch
 from torch import Tensor
 import gpytorch
 import linear_operator
-from experimental_uncertainty_kernel import ExperimentalUncertaintyKernel, fix_lengthscale
 from scipy.stats import chi2
+from math import log, pi
 import sys
 import time
 
-torch.set_default_dtype(torch.float64)
 sys.path.insert(0,"..")
 sys.path.insert(0,".")
+from experimental_uncertainty_kernel import ExperimentalUncertaintyKernel, fix_lengthscale
+
+torch.set_default_dtype(torch.float64)
 
 # Define parameters to be initialized by jobctl
 
 data_dir = "../../Data/"
 data_file = "roi_all_comps.pt"
-test_samp = False
-init_params = False
-training_iterations = False
-save_state_cadence = False
-time_limit = False
-max_cg = False
-lr = False
-max_prec_size = False
-prec_tolerance = False
-octl = False
-
+thin_data = None
+test_samp = None
+init_params = None
+training_iterations = None
+save_state_cadence = None
+time_limit = None
+max_cg = None
+lr = None
+max_prec_size = None
+prec_tolerance = None
+octl = None
+mask=None
+roi_selection = None
+zscore_input = False
+zscore_output = False
+zscore_per_expt = False
+scale_wns = None
+scale_out = None
+report_full_validation = False
 
 # jobctl is a dict containing control parameters and the GPyTorch model class EPUModel 
 from train_in import jobctl, EPUModel
@@ -37,8 +47,65 @@ dt = torch.load(data_dir+data_file)
 k = list(dt.keys)
 expts= dt[k[0]] ; spec = dt[k[1]]
 
+roi_bds = Tensor([[889.89, 1090.0], [1270.0, 1360.0], [1379.99, 1560.0], [1589.95, 1770.0]])
+
+if mask is not None:
+    nexp = spec.shape[0]
+    ind = [i for i in range(nexp) if not i in mask]
+    expts = expts[ind, :, :]
+    spec = spec[ind, :]
+
+if roi_selection is not None:
+    mask = torch.zeros_like(spec[0,:]).to(bool)
+    for roi in roi_selection:
+        m = torch.logical_and(expts[0,:,0] > roi_bds[roi, 0], 
+                              expts[0,:,0] < roi_bds[roi, 1])
+        mask = torch.logical_or(mask, m)
+    spec = spec[:, mask]
+    expts = expts[:, mask, :]
+
+if thin_data is not None:
+    ind = torch.arange(spec.shape[1])
+    ind =ind[(ind % thin_data).to(int) == 0]
+    expts = expts[:, ind, :]
+    spec = spec[:, ind]
+
+in_mean = 0.0 ; in_std = 1.0
+if zscore_input:
+    if zscore_per_expt:
+        # Use wavenumber range of 1st experiment to zscore the wavenumbers only
+        in_mean = expts[0, :, 0].mean()
+        in_std = expts[0, :, 0].std()
+        expts[:,:,0] = (expts[:,:,0] - in_mean) / in_std
+    else:
+        in_mean = expts.mean(dim=(0,1))
+        in_std = expts.std(dim=(0,1))
+        expts = (expts - in_mean) / in_std
+
+out_mean = 0.0 ; out_std = 1.0
+if zscore_output:
+    if zscore_per_expt:
+        out_mean = spec.mean(dim=-1, keepdims=True)
+        out_std = spec.std(dim=-1, keepdims=True)
+    else:
+        out_mean = spec.mean()
+        out_std = spec.std()
+    noise = spec / out_std**2 
+    spec = (spec - out_mean) / out_std
+
+if scale_wns is not None:
+    lengths = torch.exp( scale_wns[0] + expts[:,:,1:].matmul(scale_wns[1:]) )
+    lengths = lengths / lengths[0,0]
+    expts[...,0] = expts[...,0] * lengths
+
+if scale_out is not None:
+    oscls = torch.exp( scale_out[0] + expts[:,:,1:].matmul(scale_out[1:]) )
+    oscls = oscls / oscls[0,0]
+    spec = spec / oscls
+
 block_shape = spec.shape ; dim = expts.shape[-1]
 nspecbin = block_shape[1] ; nspec = block_shape[0]
+
 
 # a test sample every test_samp bins
 ind = torch.arange(nspecbin)
@@ -50,25 +117,29 @@ tx = expts[:,train_ind,:]
 train_x = tx.reshape((-1, dim))
 ty = spec[:,train_ind]
 train_y = ty.flatten()
-
-noise = train_y
+noise = noise[:, train_ind]
+noise = noise.flatten()
 
 dof = len(train_y)
+c2 = chi2(dof)
 
 # Test and validation data
-test_x = expts[:,test_ind,:]
-test_y = spec[:,test_ind]
+val_x = expts[:,test_ind,:]
+val_y = spec[:,test_ind]
+val_noise = noise[:, test_ind]
 
-val_x = test_x[0] ; val_y = test_y[0] ; val_noise = val_y
-test_x = test_x[1:] ; test_y = test_y[1:] ; test_noise = test_y
+# val_x = test_x[0] ; val_y = test_y[0] ; val_noise = t_noise[0]
+# test_x = test_x[1:] ; test_y = test_y[1:] ; test_noise = t_noise[1:]
 
 # Put everything on GPU
 train_x = train_x.cuda()
 train_y = train_y.cuda()
+noise = noise.cuda()
 val_x = val_x.cuda()
 val_y = val_y.cuda()
 val_noise = val_noise.cuda()
-dof_val = len(val_y)
+dof_val = val_y.shape[-1]
+c2_val = chi2(dof_val)
 
 ## Set up the model    
 likelihood = gpytorch.likelihoods.FixedNoiseGaussianLikelihood(noise=noise)
@@ -84,8 +155,9 @@ likelihood = likelihood.cuda()
 # sys.exit()
 
 # Initialization of parameters
-mn_init = train_y.mean()
-init_params["mean_module.constant"]=mn_init
+if hasattr(model.mean_module, "constant") and not init_params.get("mean_module.constant"):
+    mn_init = train_y.mean()
+    init_params["mean_module.constant"]=mn_init
 model.initialize(**init_params)
 
 
@@ -100,7 +172,8 @@ if len(sys.argv) > 1:
         model.load_state_dict(state_dict)
         curr_iter = int(sys.argv[1][16:21]) + 1
     except FileNotFoundError:
-        pass
+        print(f"File {sys.argv[1]} not found!")
+        raise
 
 
 model.train()
@@ -126,7 +199,7 @@ with open("model_output.txt", "a") as ofd:
             loss = -mll(output, train_y)
             loss.backward()
             optimizer.step()
-            mn = model.mean_module.constant.item()
+            # mn = model.mean_module.constant.item()
 
             vals = [] ; fmts = [] ; names = []
             val=0
@@ -143,17 +216,34 @@ with open("model_output.txt", "a") as ofd:
                 diff = (train_y - mean).unsqueeze(-1)
                 covar = covar.evaluate_kernel()
                 inv_quad_t, logdet_t = covar.inv_quad_logdet(inv_quad_rhs=diff, logdet=True)
-                loss2 = inv_quad_t + logdet_t
+                inv_quad_t = inv_quad_t.cpu().detach()
+                pvalue = c2.cdf(inv_quad_t)
+                qvalue = c2.sf(inv_quad_t)
+                loss2 = 0.5 * ( (inv_quad_t + logdet_t)/train_y.shape[-1] + log(2*pi) )
 
                 model.eval() ; likelihood.eval()
 
+                chi2_val = [] ; logpval_val = [] ; logsfval_val = []
                 with gpytorch.settings.fast_pred_var():
-                    mvn = model(val_x)
-                    lik = likelihood(mvn, noise=val_noise)
-                    mean, covar = lik.loc, lik.lazy_covariance_matrix
-                    diff = (val_y - mean).unsqueeze(-1)
-                    covar = covar.evaluate_kernel()
-                    inv_quad_vf = covar.inv_quad(inv_quad_rhs=diff)
+                    for l in range(nspec):
+                        mvn = model(val_x[l,...])
+                        lik = likelihood(mvn, noise=val_noise[l,:])
+                        mean, covar = lik.loc, lik.lazy_covariance_matrix
+                        diff = (val_y[l,:] - mean).unsqueeze(-1)
+                        covar = covar.evaluate_kernel()
+                        inv_quad_vf = covar.inv_quad(inv_quad_rhs=diff).cpu().detach()
+                        pvalue_val = c2_val.logcdf(inv_quad_vf)
+                        qvalue_val = c2_val.logsf(inv_quad_vf)
+                        chi2_val.append(inv_quad_vf)
+                        logpval_val.append(pvalue_val)
+                        logsfval_val.append(qvalue_val)
+
+                chi2_val_mn = Tensor(chi2_val).mean()
+                chi2_val_md = Tensor(chi2_val).quantile(q=0.5)
+                logpval_val_mn = Tensor(logpval_val).mean()
+                logpval_val_md = Tensor(logpval_val).quantile(q=0.5)
+                logsfval_val_mn = Tensor(logsfval_val).mean()
+                logsfval_val_md = Tensor(logsfval_val).quantile(q=0.5)
 
                 model.train() ; likelihood.train()
 
@@ -163,16 +253,27 @@ with open("model_output.txt", "a") as ofd:
             tick = tock
 
             outstr = f"{iter}: Loss = {loss.item():10.3E};"+ \
-                     f"\n  Mean = {mn:16.9E};"
+                     f"\n  Evaluated loss = {loss2:10.3E};"
 
             fstr = ""
             for i in range(len(names)):
                 fstr += "\n  {1} = {{{0}:{2}}}".format(i, names[i], fmts[i])
             outstr += fstr.format(*vals)
             outstr += \
-                f"\n  Training Chi-squared = {inv_quad_t:16.9E}, DOF = {dof:d}"+\
+                f"\n  Training Chi-squared = {inv_quad_t:16.9E}, DOF = {dof:d},"+\
+                f"\n                     P = {pvalue:10.3E}, 1-P = {qvalue:10.3E}"+\
                 f"\n  Training Log Det = {logdet_t:16.9E}"+\
-                f"\n  Fast Validation Chi-squared = {inv_quad_vf:16.9E}, DOF = {dof_val:d}"+\
+                f"\n  Mean Val. Chi-squared = {chi2_val_mn:16.9E}, DOF = {dof_val:d},"+\
+                f"\n            Mean log(P) = {logpval_val_mn:10.3E}, Mean log(1-P) = {logsfval_val_mn:10.3E}"+\
+                f"\n  Median Val. Chi-squared = {chi2_val_md:16.9E}, DOF = {dof_val:d},"+\
+                f"\n            Median log(P) = {logpval_val_mn:10.3E}, Median log(1-P) = {logsfval_val_mn:10.3E}"
+            if report_full_validation:
+                outstr += \
+                "\n Val Chi_Squared: [" + ("{:16.9E} ," * (nspec-1)).format(*chi2_val[:-1]) + "{:16.9E}]".format(chi2_val[-1]) +\
+                "\n Val Log P: [" + ("{:16.9E} ," * (nspec-1)).format(*logpval_val[:-1]) + "{:16.9E}]".format(logpval_val[-1]) +\
+                "\n Val Log(1-P): [" + ("{:16.9E} ," * (nspec-1)).format(*logsfval_val[:-1]) + "{:16.9E}]".format(logsfval_val[-1])
+
+            outstr += \
                 f"\n  Elapsed Time in This Iteration = {dt:.2f}"+\
                 "\n"
             ofd.write(outstr)
